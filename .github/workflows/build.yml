@@ -10,27 +10,46 @@ on:
 permissions:
   contents: write
   actions: write
+# One run per job id (the worker dispatches each job separately, so different apps build in parallel);
+# job-less cron/backup runs share one group.
 concurrency:
-  group: xtg-builder
+  group: xtg-build-${{ github.event.inputs.job || 'poll' }}
   cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Backup path: if the always-on worker is not running, restart it, and only then do a cron poll window here.
+      - name: Worker watchdog
+        id: wd
+        if: github.event.inputs.job == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list -R "$GITHUB_REPOSITORY" -w worker.yml -L 20 --json status -q '[.[]|select(.status!="completed")]|length' || echo 0)
+          echo "active worker runs: $n"
+          if [ "${n:-0}" -gt 0 ]; then echo "alive=true" >> "$GITHUB_OUTPUT"; else
+            gh workflow run worker.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" && echo "worker restarted"
+            echo "alive=false" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/checkout@v4
+        if: steps.wd.outputs.alive != 'true'
       - uses: actions/setup-java@v4
+        if: steps.wd.outputs.alive != 'true'
         with:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
+        if: steps.wd.outputs.alive != 'true'
         with:
           gradle-version: "8.3"
           cache-read-only: false
       - uses: actions/setup-node@v4
+        if: steps.wd.outputs.alive != 'true'
         with:
           node-version: "20"
       - name: Build queued apps
+        if: steps.wd.outputs.alive != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           ONLY_JOB: ${{ github.event.inputs.job }}

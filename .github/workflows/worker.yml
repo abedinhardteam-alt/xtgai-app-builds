@@ -1,0 +1,31 @@
+# Always-on queue watcher: checks Firestore every ~20 s and starts a separate build.yml run per job, so a new
+# App Builder job is picked up in well under a minute instead of waiting for GitHub's (often late) */5 cron.
+# One worker at a time (concurrency); before the 6 h job limit it re-dispatches itself. If the chain ever breaks,
+# the */5 cron in build.yml and the weekly keepalive start it again. Public repo => Actions minutes are free.
+name: XTG Builder Worker
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7 */6 * * *"
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: xtg-worker
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - name: Watch the queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_SECONDS: "20700"
+        run: node builder/worker.js
+      - name: Hand over to the next worker
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run worker.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"

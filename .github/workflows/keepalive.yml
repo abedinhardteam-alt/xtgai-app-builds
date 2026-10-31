@@ -7,6 +7,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  actions: write
 jobs:
   keepalive:
     runs-on: ubuntu-latest
@@ -17,3 +18,9 @@ jobs:
           git config user.name "xtg-builder-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .keepalive && git commit -m "keepalive" && git push || echo "nothing to commit"
+      - name: Make sure the always-on worker is running
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list -R "$GITHUB_REPOSITORY" -w worker.yml -L 20 --json status -q '[.[]|select(.status!="completed")]|length' || echo 0)
+          [ "${n:-0}" -gt 0 ] && echo "worker alive" || gh workflow run worker.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
