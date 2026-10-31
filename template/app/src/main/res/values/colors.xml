@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="brand">__COLOR__</color>
+  <color name="brand_dark">__COLOR_DARK__</color>
+</resources>
