@@ -16,6 +16,7 @@ const POLL_SECONDS = Number(process.env.POLL_SECONDS || 240);
 const DAILY_CAP = Number(process.env.DAILY_CAP || 60);
 const STEPS = { claimed: 1, checking: 2, repairing: 2, preparing: 3, building: 4, signing: 5, publishing: 6, done: 7, failed: 7 };
 const ONLY = process.env.ONLY_JOB || "";
+const STALE_MS = 30 * 60e3;   // a non-final status older than this is treated as abandoned (build timeout is 45 min)
 
 const val = (f) => f == null ? undefined : f.stringValue ?? f.timestampValue ?? (f.integerValue != null ? Number(f.integerValue) : undefined);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -27,8 +28,10 @@ async function fsFetch(url, opt = {}) {
   return r.status === 404 ? null : JSON.parse(t || "{}");
 }
 
-async function queued() {
-  const since = new Date(Date.now() - 24 * 3600e3).toISOString();
+/** Jobs created after `since` (ISO). Pass the newest createdAt already seen so an idle poll costs ONE Firestore
+ *  read (an empty query result is billed as 1 read) instead of one per recent job — keeps the free daily quota safe. */
+async function queued(since) {
+  since = since || new Date(Date.now() - 24 * 3600e3).toISOString();
   const q = { structuredQuery: { from: [{ collectionId: "xtg_builds" }],
     where: { fieldFilter: { field: { fieldPath: "createdAt" }, op: "GREATER_THAN", value: { timestampValue: since } } },
     orderBy: [{ field: { fieldPath: "createdAt" }, direction: "ASCENDING" }], limit: 20 } };
@@ -43,6 +46,16 @@ async function getStatus(id) {
   if (!d) return null;
   const f = d.fields || {};
   return { stage: val(f.stage), at: val(f.at) };
+}
+/** Atomic claim: creates the status doc only if it does not exist yet (Firestore precondition), so two pollers
+ *  (worker + backup cron) can never build the same job twice. Returns true if this run owns the job now. */
+async function claim(id, msg) {
+  const fields = { stage: { stringValue: "claimed" }, step: { integerValue: "1" }, total: { integerValue: "7" },
+    msg: { stringValue: String(msg).slice(0, 280) }, runUrl: { stringValue: RUN_URL } };
+  const body = { writes: [{ update: { name: `${DOCS}/xtg_build_status/${id}`, fields }, currentDocument: { exists: false },
+    updateTransforms: [{ fieldPath: "at", setToServerValue: "REQUEST_TIME" }] }] };
+  try { await fsFetch(`${API}:commit`, { method: "POST", body: JSON.stringify(body) }); console.log(`[${id}] claimed: ${msg}`); return true; }
+  catch (e) { console.log(`[${id}] claim skipped:`, e.message.slice(0, 120)); return false; }
 }
 async function setStatus(id, stage, msg, extra = {}) {
   const fields = { stage: { stringValue: stage }, step: { integerValue: String(STEPS[stage] || 0) }, total: { integerValue: "7" },
@@ -66,9 +79,12 @@ function releasesLast24h() {
 async function handle(job) {
   const st = await getStatus(job.id);
   if (st && (st.stage === "failed" || st.stage === "done")) return false;
+  // Someone else (the always-on worker or another poll run) already owns it and it is not stale.
+  if (!ONLY && st && Date.now() - Date.parse(st.at || 0) < STALE_MS) return false;
   if (releaseExists(job.id)) return false;
   if (releasesLast24h() >= DAILY_CAP) { await setStatus(job.id, "failed", `আজকের সার্ভার সীমা (${DAILY_CAP}টি বিল্ড/২৪ ঘণ্টা) পূর্ণ — কাল আবার চেষ্টা করুন।`); return false; }
-  await setStatus(job.id, "claimed", "ক্লাউড বিল্ড সার্ভার কাজটি নিয়েছে");
+  if (!st) { if (!(await claim(job.id, "ক্লাউড বিল্ড সার্ভার কাজটি নিয়েছে"))) return false; }
+  else await setStatus(job.id, "claimed", "ক্লাউড বিল্ড সার্ভার কাজটি নিয়েছে");
   const work = path.join(os.tmpdir(), "job-" + job.id);
   try {
     const r = await buildJob(job, work, (stage, msg) => setStatus(job.id, stage, msg));
@@ -87,13 +103,20 @@ async function handle(job) {
   return true;
 }
 
-(async () => {
+/** ISO cursor (ms precision; Firestore may return µs, so the newest doc can come back once more — `seen` dedups). */
+function newestCursor(jobs, cursor) {
+  let ms = cursor ? Date.parse(cursor) : 0;
+  for (const j of jobs) { const t = Date.parse(j.createdAt || ""); if (t > ms) ms = t; }
+  return ms ? new Date(ms).toISOString() : cursor;
+}
+async function main() {
   const end = Date.now() + POLL_SECONDS * 1000;
   const seen = new Set();
-  let built = 0;
+  let built = 0, cursor = null;
   do {
     let jobs = [];
-    try { jobs = await queued(); } catch (e) { console.log("queue read failed:", e.message); }
+    try { jobs = await queued(cursor); } catch (e) { console.log("queue read failed:", e.message); }
+    cursor = newestCursor(jobs, cursor);
     if (ONLY) jobs = jobs.filter((j) => j.id === ONLY);
     for (const j of jobs) {
       if (seen.has(j.id)) continue;
@@ -101,6 +124,7 @@ async function handle(job) {
       if (!/^[a-z0-9]{12,40}$/.test(j.id) || !j.html) continue;
       if (await handle(j)) built++;
     }
+    if (ONLY && seen.has(ONLY)) break;          // single-job run (dispatched by the worker): done, free the runner
     if (Date.now() < end) await sleep(20000);
   } while (Date.now() < end);
   console.log("poll window finished, built", built);
@@ -110,4 +134,7 @@ async function handle(job) {
     try { gh(["workflow", "run", "build.yml", "-R", REPO, "--ref", process.env.GITHUB_REF_NAME || "main"]); console.log("next poll window dispatched"); }
     catch (e) { console.log("chain dispatch failed:", String(e.stderr || e.message).slice(0, 200)); }
   }
-})();
+}
+
+module.exports = { queued, newestCursor, getStatus, setStatus, claim, releaseExists, gh, STALE_MS, REPO, RUN_URL };
+if (require.main === module) main();
