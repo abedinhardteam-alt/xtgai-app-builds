@@ -1,0 +1,19 @@
+# GitHub disables scheduled workflows in public repos after 60 days without repository activity.
+# This commits a tiny timestamp once a week so the builder schedule stays on.
+name: Keep builder schedule alive
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          date -u +%Y-%m-%dT%H:%M:%SZ > .keepalive
+          git config user.name "xtg-builder-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive && git commit -m "keepalive" && git push || echo "nothing to commit"
