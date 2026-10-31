@@ -1,0 +1,52 @@
+    // >>> XTG AI APP BUILDER (Protection By ISHAQ Officials) - queue for the free GitHub Actions builder
+    // Phone (anonymous auth) creates a job + bumps its quota in ONE batch; the public GitHub workflow reads the
+    // queue without credentials and writes progress-only status docs. APKs live on GitHub Releases.
+    function xtgDay() { return math.floor(request.time.toMillis() / 86400000); }
+    match /xtg_build_quota/{uid} {
+      allow get: if signedIn() && uid == me();
+      allow list, delete: if false;
+      allow create: if signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['last', 'day', 'n'])
+        && request.resource.data.last == request.time
+        && request.resource.data.day == xtgDay() && request.resource.data.n == 1;
+      allow update: if signedIn() && uid == me()
+        && request.resource.data.keys().hasOnly(['last', 'day', 'n'])
+        && request.resource.data.last == request.time
+        && resource.data.last < request.time - duration.value(2, 'm')
+        && request.resource.data.day == xtgDay()
+        && ((resource.data.day == xtgDay() && request.resource.data.n == resource.data.n + 1 && request.resource.data.n <= 15)
+            || (resource.data.day < xtgDay() && request.resource.data.n == 1));
+    }
+    match /xtg_builds/{id} {
+      allow get: if true;
+      allow list: if request.query.limit <= 20;
+      allow update, delete: if false;
+      allow create: if signedIn() && id.matches('^[a-z0-9]{12,40}$')
+        && request.resource.data.keys().hasOnly(['uid', 'name', 'desc', 'html', 'color', 'icon', 'status', 'createdAt', 'v'])
+        && request.resource.data.uid == me()
+        && request.resource.data.status == 'queued'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 40
+        && request.resource.data.desc is string && request.resource.data.desc.size() <= 600
+        && request.resource.data.html is string && request.resource.data.html.size() >= 200 && request.resource.data.html.size() <= 250000
+        && request.resource.data.color is string && request.resource.data.color.matches('^#[0-9A-Fa-f]{6}$')
+        && request.resource.data.icon is string && request.resource.data.icon.size() <= 16
+        && getAfter(/databases/$(database)/documents/xtg_build_quota/$(me())).data.last == request.time;
+    }
+    match /xtg_build_status/{id} {
+      allow get: if true;
+      allow list, delete: if false;
+      allow create, update: if exists(/databases/$(database)/documents/xtg_builds/$(id))
+        && request.resource.data.keys().hasOnly(['stage', 'step', 'total', 'msg', 'at', 'runUrl', 'asset', 'pkg', 'sha256', 'vn'])
+        && request.resource.data.stage in ['claimed', 'checking', 'repairing', 'preparing', 'building', 'signing', 'publishing', 'done', 'failed']
+        && request.resource.data.step is int && request.resource.data.step >= 0 && request.resource.data.step <= 10
+        && request.resource.data.total is int && request.resource.data.total <= 10
+        && request.resource.data.msg is string && request.resource.data.msg.size() <= 300
+        && request.resource.data.at == request.time
+        && (!('runUrl' in request.resource.data) || request.resource.data.runUrl.matches('^https://github[.]com/abedinhardteam-alt/xtgai-app-builds/actions/runs/[0-9]+$'))
+        && (!('asset' in request.resource.data) || request.resource.data.asset.matches('^[a-z0-9]{1,40}-v[0-9.]{3,24}[.]apk$'))
+        && (!('pkg' in request.resource.data) || request.resource.data.pkg.matches('^com[.]ishaq[.]xtgapps[.][a-z0-9_]{1,40}$'))
+        && (!('sha256' in request.resource.data) || request.resource.data.sha256.matches('^[0-9a-f]{64}$'))
+        && (!('vn' in request.resource.data) || request.resource.data.vn.matches('^[0-9.]{3,24}$'));
+    }
+    // <<< XTG AI APP BUILDER END
