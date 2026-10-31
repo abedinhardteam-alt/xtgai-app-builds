@@ -67,7 +67,7 @@ async function handle(job) {
   const st = await getStatus(job.id);
   if (st && (st.stage === "failed" || st.stage === "done")) return false;
   if (releaseExists(job.id)) return false;
-  if (releasesLast24h() >= DAILY_CAP) { await setStatus(job.id, "failed", `আজকের সার্ভার সীমা (${DAILY_CAP}টি বিল্ড/২৪ ঘণ্টা) পূর্ণ — কাল আবার চেষ্টা করুন।`); return true; }
+  if (releasesLast24h() >= DAILY_CAP) { await setStatus(job.id, "failed", `আজকের সার্ভার সীমা (${DAILY_CAP}টি বিল্ড/২৪ ঘণ্টা) পূর্ণ — কাল আবার চেষ্টা করুন।`); return false; }
   await setStatus(job.id, "claimed", "ক্লাউড বিল্ড সার্ভার কাজটি নিয়েছে");
   const work = path.join(os.tmpdir(), "job-" + job.id);
   try {
@@ -90,6 +90,7 @@ async function handle(job) {
 (async () => {
   const end = Date.now() + POLL_SECONDS * 1000;
   const seen = new Set();
+  let built = 0;
   do {
     let jobs = [];
     try { jobs = await queued(); } catch (e) { console.log("queue read failed:", e.message); }
@@ -98,9 +99,15 @@ async function handle(job) {
       if (seen.has(j.id)) continue;
       seen.add(j.id);
       if (!/^[a-z0-9]{12,40}$/.test(j.id) || !j.html) continue;
-      await handle(j);
+      if (await handle(j)) built++;
     }
     if (Date.now() < end) await sleep(20000);
   } while (Date.now() < end);
-  console.log("poll window finished");
+  console.log("poll window finished, built", built);
+  // GitHub cron can be late. While builds are coming in, start the next poll window right away
+  // (workflow_dispatch from GITHUB_TOKEN is allowed); when idle, the */5 schedule takes over again.
+  if (built > 0 && !ONLY && process.env.CHAIN !== "0") {
+    try { gh(["workflow", "run", "build.yml", "-R", REPO, "--ref", process.env.GITHUB_REF_NAME || "main"]); console.log("next poll window dispatched"); }
+    catch (e) { console.log("chain dispatch failed:", String(e.stderr || e.message).slice(0, 200)); }
+  }
 })();

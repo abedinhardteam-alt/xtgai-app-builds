@@ -9,6 +9,7 @@ on:
         required: false
 permissions:
   contents: write
+  actions: write
 concurrency:
   group: xtg-builder
   cancel-in-progress: false
